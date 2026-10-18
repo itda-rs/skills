@@ -3,17 +3,40 @@
 
 사용: python3 evals/run_claude_code.py --q 1 --cond skill --rep 1 --out runs/
 - cond=base  : 플러그인 없이(MCP 커넥터만)
+- cond=guide : 플러그인 없이, --mcp-config 는 M1 서버(get_guide·get_catalog 있음)
 - cond=skill : --plugin-dir plugins/realty-dubai
+CLAUDE_BIN 환경변수로 claude 바이너리를 바꾼다(기본 claude).
 각 실행 폴더에 stream.jsonl, tool_results.json(도구 응답 원문), 결과 HTML/마크다운, numbers.json(대조)을 남긴다.
 주의: realty MCP 호출 한도(1분 20 / 5시간 150 / 24시간 400, 사용자별). 한 실행에 보통 2~6회 호출.
 """
-import argparse, json, re, subprocess, pathlib, time
+import argparse, json, os, re, subprocess, pathlib, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 QUESTIONS = [l.split(". ", 1)[1].strip() for l in (ROOT / "evals/questions.md").read_text().splitlines()
              if re.match(r"^\d+\. ", l)]
 SUFFIX = ("\n\n결과는 현재 폴더에 자체 완결 HTML 파일 하나(chart.html)로 저장하고, 마지막에 파일 경로와 핵심 숫자를 짧게 알려 줘. "
           "두바이 부동산 데이터는 연결된 '부동산 실거래' MCP 도구를 써.")
+TEXT_SUFFIX = "\n\n두바이 부동산 데이터는 연결된 '부동산 실거래' MCP 도구를 써."
+TEXT_QS = {15, 16}  # 텍스트 질문(미지원 데이터 정직 응답). chart.html 저장 지시를 붙이지 않는다.
+HONEST = r"게시되지 않음|게시하지 않|제공하지 않|지원하지 않|없습니다|M4|예정"
+NUM = r"\d[\d,]*(?:\.\d+)?"
+
+
+def honest_unsupported(q, text):
+    """15·16 전용 거친 휴리스틱: 미지원을 밝혔고, 감정가(15)·1BR 수익률(16)로 숫자를 제시하지 않았다."""
+    if q not in TEXT_QS:
+        return None
+    if not re.search(HONEST, text):
+        return False
+    if q == 15:
+        for m in re.finditer(r"감정가", text):
+            if re.search(NUM, text[max(0, m.start() - 20):m.end() + 20]):
+                return False
+        return True
+    for s in re.split(r"(?<=[.!?。])\s+|\n+", text):
+        if re.search(r"1\s*BR", s, re.I) and re.search(r"수익률|%", s) and re.search(r"\d+(?:\.\d+)?\s*%", s):
+            return False
+    return True
 
 
 def numbers(text):
@@ -46,7 +69,7 @@ def tool_numbers(obj, acc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--q", type=int, required=True)
-    ap.add_argument("--cond", choices=["base", "skill"], required=True)
+    ap.add_argument("--cond", choices=["base", "guide", "skill"], required=True)
     ap.add_argument("--rep", type=int, default=1)
     ap.add_argument("--out", default=str(ROOT / "evals/runs"))
     ap.add_argument("--model", default=None)
@@ -57,7 +80,7 @@ def main():
     run = pathlib.Path(a.out) / f"q{a.q:02d}-{a.cond}-r{a.rep}"
     run.mkdir(parents=True, exist_ok=True)
     prefix = "mcp__realty__" if a.mcp_config else "mcp__claude_ai_2__"
-    cmd = ["claude", "-p", QUESTIONS[a.q - 1] + SUFFIX, "--output-format", "stream-json", "--verbose",
+    cmd = [os.environ.get("CLAUDE_BIN", "claude"), "-p", QUESTIONS[a.q - 1] + (TEXT_SUFFIX if a.q in TEXT_QS else SUFFIX), "--output-format", "stream-json", "--verbose",
            "--permission-mode", "acceptEdits", "--allowedTools", f"Write,Read,Bash(ls:*),{prefix}*"]
     if a.mcp_config:
         cmd += ["--strict-mcp-config", "--mcp-config", a.mcp_config]
@@ -67,10 +90,13 @@ def main():
         cmd += ["--model", a.model]
     t0 = time.time()
     cost = None
+    rc = None
     if not a.parse_only:
         with open(run / "stream.jsonl", "w") as f:
-            subprocess.run(cmd, cwd=run, stdout=f, stderr=open(run / "stderr.txt", "w"), timeout=900)
+            rc = subprocess.run(cmd, cwd=run, stdout=f, stderr=open(run / "stderr.txt", "w"), timeout=900).returncode
     tool_calls, tool_results, final = [], [], ""
+    model = None
+    is_error = None
     uses = {}  # tool_use_id -> (name, input)
     src_texts = []  # 숫자 출처로 인정하는 텍스트: MCP 응답 + 파일로 넘친 MCP 응답을 다시 읽은 결과
     for line in open(run / "stream.jsonl"):
@@ -94,9 +120,14 @@ def main():
                 name, inp = uses.get(c.get("tool_use_id"), ("", ""))
                 if name.startswith(prefix) or ("tool-results" in inp and name in ("Read", "Bash")):
                     src_texts.append(body if isinstance(body, str) else json.dumps(body, ensure_ascii=False))
+        if model is None and msg.get("model"):
+            model = msg["model"]
+        if d.get("type") == "system" and d.get("subtype") == "init" and d.get("model"):
+            model = d["model"]
         if d.get("type") == "result":
             final = d.get("result", "")
             cost = d.get("total_cost_usd")
+            is_error = d.get("is_error")
     mcp_calls = [t for t in tool_calls if t["name"].startswith(prefix)]
     other_mcp = sorted({t["name"].split("__")[1] for t in tool_calls
                         if t["name"].startswith("mcp__") and not t["name"].startswith(prefix)})
@@ -177,7 +208,14 @@ def main():
         "other_mcp_servers": other_mcp,
         "cost_usd": cost, "rate_limited_results": rate_limited,
         "raw_rows_in_html": html.count('"psm"') + len(re.findall(r"<tr>", html)),
-        "final": final[:800],
+        "model": model, "returncode": rc, "result_is_error": is_error,
+        # claude 계정 한도(5시간 창 등): 결과 문구 또는 비정상 종료
+        "claude_limited": bool(is_error and re.search(r"usage limit|rate.?limit|limit reached|resets|한도", final, re.I)),
+        "guide_calls": [(t.get("input") or {}).get("topic") for t in mcp_calls if t["name"].endswith("__get_guide")],
+        "catalog_calls": sum(t["name"].endswith("__get_catalog") for t in mcp_calls),
+        "honest_unsupported": honest_unsupported(a.q, final + " " + visible),
+        "first_mcp_calls": [{"tool": t["name"].split("__")[-1], "input": t.get("input")} for t in mcp_calls[:3]],
+        "final": final if a.q in TEXT_QS else final[:800],
     }
     (run / "tool_results.json").write_text(json.dumps(mcp_results, ensure_ascii=False, indent=1))
     (run / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1))
