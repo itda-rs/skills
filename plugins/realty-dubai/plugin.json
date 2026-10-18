@@ -1,6 +1,6 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "realty-dubai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "부동산 실거래 MCP(realty.rs.itda.work) 결과를 출처·기준일·n 을 지키며 표·차트·SVG 지도로 그린다."
 }

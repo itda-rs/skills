@@ -51,11 +51,16 @@ def main():
     ap.add_argument("--out", default=str(ROOT / "evals/runs"))
     ap.add_argument("--model", default=None)
     ap.add_argument("--parse-only", action="store_true", help="이미 있는 stream.jsonl 만 다시 판정")
+    ap.add_argument("--mcp-config", default=None,
+                    help="로컬 MCP 설정 JSON(서버 이름 realty). 주면 --strict-mcp-config 로 이것만 쓴다(운영 한도 우회, 평가 전용)")
     a = ap.parse_args()
     run = pathlib.Path(a.out) / f"q{a.q:02d}-{a.cond}-r{a.rep}"
     run.mkdir(parents=True, exist_ok=True)
+    prefix = "mcp__realty__" if a.mcp_config else "mcp__claude_ai_2__"
     cmd = ["claude", "-p", QUESTIONS[a.q - 1] + SUFFIX, "--output-format", "stream-json", "--verbose",
-           "--permission-mode", "acceptEdits", "--allowedTools", "Write,Read,Bash(ls:*),mcp__claude_ai_2__*"]
+           "--permission-mode", "acceptEdits", "--allowedTools", f"Write,Read,Bash(ls:*),{prefix}*"]
+    if a.mcp_config:
+        cmd += ["--strict-mcp-config", "--mcp-config", a.mcp_config]
     if a.cond == "skill":
         cmd += ["--plugin-dir", str(ROOT / "plugins/realty-dubai")]
     if a.model:
@@ -87,12 +92,14 @@ def main():
                     body = "".join(x.get("text", "") for x in body if isinstance(x, dict))
                 tool_results.append(body)
                 name, inp = uses.get(c.get("tool_use_id"), ("", ""))
-                if name.startswith("mcp__claude_ai_2__") or ("tool-results" in inp and name in ("Read", "Bash")):
+                if name.startswith(prefix) or ("tool-results" in inp and name in ("Read", "Bash")):
                     src_texts.append(body if isinstance(body, str) else json.dumps(body, ensure_ascii=False))
         if d.get("type") == "result":
             final = d.get("result", "")
             cost = d.get("total_cost_usd")
-    mcp_calls = [t for t in tool_calls if t["name"].startswith("mcp__claude_ai_2__")]
+    mcp_calls = [t for t in tool_calls if t["name"].startswith(prefix)]
+    other_mcp = sorted({t["name"].split("__")[1] for t in tool_calls
+                        if t["name"].startswith("mcp__") and not t["name"].startswith(prefix)})
     mcp_results = []
     for body in tool_results:
         try:
@@ -148,12 +155,19 @@ def main():
         "mcp_calls": [t["name"].split("__")[-1] for t in mcp_calls],
         "html": bool(html), "shown_numbers": len(shown), "unmatched_numbers": unmatched[:60],
         "script_numbers": len(script_vals), "unmatched_script_numbers": unmatched_script[:60],
+        "caption_incl_script": {k: bool(re.search(p, visible + " " + script)) for k, p in
+                    {"source": r"DLD|data\.dubai|Dubai Land", "as_of": r"기준일|as of|2026-10-\d\d",
+                     "n": r"\bn\s*=|건수|표본", "notice": r"공식 서비스|official"}.items()},
         "caption": {k: bool(re.search(p, visible)) for k, p in
                     {"source": r"DLD|data\.dubai|Dubai Land", "as_of": r"기준일|as of|2026-10-\d\d",
                      "n": r"\bn\s*=|건수|표본", "notice": r"공식 서비스|official"}.items()},
         "low_sample_marked": bool(re.search(r"표본 부족|low.?sample", visible, re.I)),
         "split": bool(re.search(r"분양|오프플랜|off-?plan", visible, re.I) and re.search(r"준공|ready", visible, re.I)) or
                  bool(re.search(r"합산", visible)),
+        # 엄격: 분양·준공을 실제로 따로 조회했거나(registration=offplan/ready 호출) 응답 자체가 둘로 나뉘어 왔다.
+        "split_strict": any(re.search(r'"registration":\s*"(offplan|ready)"', json.dumps(t.get("input") or {})) for t in mcp_calls)
+                        or any(isinstance(r, dict) and re.search(r'"(offplan|ready)":\s*\{', json.dumps(r)) for r in mcp_results),
+        "other_mcp_servers": other_mcp,
         "cost_usd": cost, "rate_limited_results": rate_limited,
         "raw_rows_in_html": html.count('"psm"') + len(re.findall(r"<tr>", html)),
         "final": final[:800],

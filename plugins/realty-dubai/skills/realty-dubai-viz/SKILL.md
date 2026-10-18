@@ -11,8 +11,10 @@ realty MCP 가 **숫자**를 주고, 이 스킬은 **그리는 법**을 정한�
 1. **숫자는 도구 응답 값만 쓴다.** 중앙값·평균·비율·합계를 새로 계산하지 않는다. 표시용 반올림만 한다.
    - 예외: 축 범위·막대 길이 같은 *그리기용* 좌표 계산은 해도 된다. 그 결과를 숫자로 적지 않는다.
 2. **값이 null 이거나 `low_sample`=1/true 이면 "표본 부족"** 으로 그린다: 회색(#46534e) 칸·빈 막대·끊긴 선. 다른 기간·지역 값으로 채우거나 보간하지 않는다. n 은 그대로 보인다.
-3. **모든 그림에 캡션**: `출처: DLD 실거래(data.dubai, <source.sales_dataset>) · 기준일 <source.data_as_of> · n=<값> · 기간 <filters.months>개월` + "두바이 정부 공식 서비스 아님 · 투자 권유 아님". 지도는 `attribution`(DM Communities 경계 · © OpenStreetMap contributors)도 적는다.
-4. **분양(offplan)과 준공(ready)은 나눠 그린다.** `registration=all` 이면 제목에 "분양·준공 합산"이라고 적는다.
+3. **모든 그림에 캡션**(정적 HTML 텍스트로 쓴다. JS 로 그리지 않는다 — 그림이 실패해도 출처가 남아야 한다): `출처: DLD 실거래(data.dubai, <source.sales_dataset>) · 기준일 <source.data_as_of> · n=<값> · 기간 <filters.months>개월` + "두바이 정부 공식 서비스 아님 · 투자 권유 아님". 지도는 `attribution`(DM Communities 경계 · © OpenStreetMap contributors)도 적는다.
+4. **분양(offplan)과 준공(ready)은 나눠 그린다.** 시세 도구는 `registration="offplan"`, `"ready"` 로 따로 부른다.
+   합산(`registration=all`)으로 그릴 이유가 있으면 제목에 "분양·준공 합산"이라고 적고, 같은 곳의 분양·준공 값을 표로 함께 낸다.
+   월별 추세(`get_monthly_trend`)처럼 나뉘어 게시되지 않는 것은 "분양·준공 구분 게시되지 않음"이라고 적는다.
 5. **실거래·임대·레이어(관리비·연식 등)·사용자 호가는 한 축·한 열에 섞지 않는다.** 감정가가 오면 "감정가"로 따로 그린다.
 6. `unavailable_dimensions` 에 있는 차원은 "게시되지 않음"으로 쓰고 다른 값으로 대신하지 않는다.
 7. **투자 판단 표현 금지**: "싸다·저평가·추천·사라" 대신 "㎡당 중앙값이 낮다·변화율 +x%"처럼 게시값만 말한다. 순위는 사용자가 정한 정렬 기준임을 밝힌다.
