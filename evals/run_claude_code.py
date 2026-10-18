@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Claude Code 헤드리스로 스킬 없음/있음 A/B 를 돌리고 판정 재료를 모은다.
+
+사용: python3 evals/run_claude_code.py --q 1 --cond skill --rep 1 --out runs/
+- cond=base  : 플러그인 없이(MCP 커넥터만)
+- cond=skill : --plugin-dir plugins/realty-dubai
+각 실행 폴더에 stream.jsonl, tool_results.json(도구 응답 원문), 결과 HTML/마크다운, numbers.json(대조)을 남긴다.
+주의: realty MCP 호출 한도(1분 20 / 5시간 150 / 24시간 400, 사용자별). 한 실행에 보통 2~6회 호출.
+"""
+import argparse, json, re, subprocess, pathlib, time
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+QUESTIONS = [l.split(". ", 1)[1].strip() for l in (ROOT / "evals/questions.md").read_text().splitlines()
+             if re.match(r"^\d+\. ", l)]
+SUFFIX = ("\n\n결과는 현재 폴더에 자체 완결 HTML 파일 하나(chart.html)로 저장하고, 마지막에 파일 경로와 핵심 숫자를 짧게 알려 줘. "
+          "두바이 부동산 데이터는 연결된 '부동산 실거래' MCP 도구를 써.")
+
+
+def numbers(text):
+    out = set()
+    for m in re.findall(r"(?<![\w.])-?\d[\d,]*\.?\d*", text):
+        v = m.replace(",", "")
+        try:
+            f = float(v)
+        except ValueError:
+            continue
+        if abs(f) >= 10:  # 작은 수(색 인덱스·연도 일부 등) 제외
+            out.add(round(f, 1))
+    return out
+
+
+def tool_numbers(obj, acc):
+    if isinstance(obj, dict):
+        for v in obj.values():
+            tool_numbers(v, acc)
+    elif isinstance(obj, list):
+        for v in obj:
+            tool_numbers(v, acc)
+    elif isinstance(obj, (int, float)) and not isinstance(obj, bool):
+        acc.add(round(float(obj), 1))
+    elif isinstance(obj, str):
+        acc |= numbers(obj)
+    return acc
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--q", type=int, required=True)
+    ap.add_argument("--cond", choices=["base", "skill"], required=True)
+    ap.add_argument("--rep", type=int, default=1)
+    ap.add_argument("--out", default=str(ROOT / "evals/runs"))
+    ap.add_argument("--model", default=None)
+    a = ap.parse_args()
+    run = pathlib.Path(a.out) / f"q{a.q:02d}-{a.cond}-r{a.rep}"
+    run.mkdir(parents=True, exist_ok=True)
+    cmd = ["claude", "-p", QUESTIONS[a.q - 1] + SUFFIX, "--output-format", "stream-json", "--verbose",
+           "--permission-mode", "acceptEdits", "--allowedTools", "Write,Read,Bash(ls:*),mcp__claude_ai_2__*"]
+    if a.cond == "skill":
+        cmd += ["--plugin-dir", str(ROOT / "plugins/realty-dubai")]
+    if a.model:
+        cmd += ["--model", a.model]
+    t0 = time.time()
+    with open(run / "stream.jsonl", "w") as f:
+        subprocess.run(cmd, cwd=run, stdout=f, stderr=open(run / "stderr.txt", "w"), timeout=900)
+    tool_calls, tool_results, skills_used, final = [], [], [], ""
+    for line in open(run / "stream.jsonl"):
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = d.get("message") or {}
+        for c in msg.get("content") or [] if isinstance(msg.get("content"), list) else []:
+            if c.get("type") == "tool_use":
+                tool_calls.append({"name": c["name"], "input": c.get("input")})
+                if c["name"] == "Skill" or "skill" in json.dumps(c.get("input", {})).lower() and c["name"] == "Skill":
+                    skills_used.append(c.get("input"))
+            if c.get("type") == "tool_result":
+                body = c.get("content")
+                if isinstance(body, list):
+                    body = "".join(x.get("text", "") for x in body if isinstance(x, dict))
+                tool_results.append(body)
+        if d.get("type") == "result":
+            final = d.get("result", "")
+            cost = d.get("total_cost_usd")
+    mcp_calls = [t for t in tool_calls if t["name"].startswith("mcp__claude_ai_2__")]
+    mcp_results = []
+    for body in tool_results:
+        try:
+            mcp_results.append(json.loads(body))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    src = set()
+    for r in mcp_results:
+        tool_numbers(r, src)
+    html = (run / "chart.html").read_text() if (run / "chart.html").exists() else ""
+    visible = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", html)
+    visible = re.sub(r"<[^>]+>", " ", visible)
+    shown = numbers(visible)
+    # 그리기 좌표가 아닌 '보이는 텍스트'의 수만 대조. 반올림 표시(k, 정수) 허용.
+    def matched(x):
+        return any(abs(x - s) <= max(0.51, abs(s) * 0.0005) for s in src) or \
+               any(abs(x * 1000 - s) <= 50 for s in src)  # 25.4k 같은 표기
+    unmatched = sorted(x for x in shown if not matched(x))
+    report = {
+        "q": a.q, "cond": a.cond, "rep": a.rep, "seconds": round(time.time() - t0),
+        "skill_tool_calls": [t for t in tool_calls if t["name"] == "Skill"],
+        "mcp_calls": [t["name"].split("__")[-1] for t in mcp_calls],
+        "html": bool(html), "shown_numbers": len(shown), "unmatched_numbers": unmatched[:60],
+        "caption": {k: bool(re.search(p, visible)) for k, p in
+                    {"source": r"DLD|data\.dubai|Dubai Land", "as_of": r"기준일|as of|2026-10-\d\d",
+                     "n": r"\bn\s*=|건수|표본", "notice": r"공식 서비스|official"}.items()},
+        "low_sample_marked": bool(re.search(r"표본 부족|low.?sample", visible, re.I)),
+        "split": bool(re.search(r"분양|오프플랜|off-?plan", visible, re.I) and re.search(r"준공|ready", visible, re.I)) or
+                 bool(re.search(r"합산", visible)),
+        "cost_usd": locals().get("cost"),
+        "final": final[:800],
+    }
+    (run / "tool_results.json").write_text(json.dumps(mcp_results, ensure_ascii=False, indent=1))
+    (run / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1))
+    print(json.dumps({k: v for k, v in report.items() if k != "final"}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

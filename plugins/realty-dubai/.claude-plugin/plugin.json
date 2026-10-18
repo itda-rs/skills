@@ -1,0 +1,11 @@
+{
+  "name": "realty-dubai",
+  "displayName": "두바이 실거래 시각화",
+  "version": "0.1.0",
+  "description": "부동산 실거래 MCP(realty.rs.itda.work) 결과를 출처·기준일·n 을 지키며 표·차트·SVG 지도로 그린다.",
+  "author": { "name": "itda-rs" },
+  "homepage": "https://realty.rs.itda.work/",
+  "repository": "https://github.com/itda-rs/skills",
+  "license": "MIT",
+  "keywords": ["dubai", "real-estate", "mcp", "visualization"]
+}

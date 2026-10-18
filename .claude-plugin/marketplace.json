@@ -1,0 +1,12 @@
+{
+  "name": "itda-rs",
+  "owner": { "name": "itda-rs" },
+  "metadata": { "description": "잇다 rs 서비스용 Agent Skills·플러그인 (데이터 없음, 규칙과 틀만)" },
+  "plugins": [
+    {
+      "name": "realty-dubai",
+      "source": "./plugins/realty-dubai",
+      "description": "두바이 실거래 MCP(부동산 실거래) 결과를 출처·n·기준일을 지키며 표·차트·지도로 그리는 스킬"
+    }
+  ]
+}

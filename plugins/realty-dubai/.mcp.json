@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "realty": { "type": "http", "url": "https://realty.rs.itda.work/mcp" }
+  }
+}
