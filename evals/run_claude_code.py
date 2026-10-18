@@ -122,32 +122,39 @@ def main():
         return any(abs(x - s) <= max(0.51, abs(s) * 0.0005) for s in src) or \
                any(abs(x * 1000 - s) <= 50 for s in src) or \
                any(abs(x * 10000 - s) <= 5000 for s in src)  # 25.4k, 260만 같은 표기
-    # 축 눈금: 같은 간격으로 3개 이상 늘어선 정수열(간격이 500·1000 등의 배수)은 그리기용이다.
+    # 축 눈금: 100 의 배수 정수가 같은 간격으로 3개 이상 늘어서면 그리기용이다(간격 무관).
     def ticks(vals):
         ints = sorted(v for v in vals if v == int(v) and v % 100 == 0)
-        out = set()
-        for step in (100, 250, 500, 1000, 2000, 2500, 5000, 8000, 10000):
-            run = [v for v in ints if v % step == 0]
-            for v in run:
-                if v + step in run and (v + 2 * step in run or v - step in run):
-                    out |= {v, v + step}
-                    if v + 2 * step in run: out.add(v + 2 * step)
-                    if v - step in run: out.add(v - step)
+        out = set(); s = set(ints)
+        for i, a in enumerate(ints):
+            for b in ints[i + 1:]:
+                step = b - a
+                if a + 2 * step in s:
+                    k = 0
+                    while a + k * step in s:
+                        out.add(a + k * step); k += 1
         return out
     tick_vals = ticks(shown)
     shown = shown - tick_vals
     # 순위·목록 번호 같은 작은 정수(≤50)는 대조에서 뺀다.
-    unmatched = sorted(x for x in shown if not matched(x) and not (x == int(x) and abs(x) <= 50))
+    # 백분위 이름(p25·p75, 25~75백분위)의 75·100 도 뺀다.
+    unmatched = sorted(x for x in shown if not matched(x) and not (x == int(x) and (abs(x) <= 50 or x in (75, 100))))
     # 그림을 JS 로 그리는 경우: 스크립트 안 데이터 리터럴(소수 또는 1000 이상)도 대조한다.
     script = " ".join(re.findall(r"<script[\s\S]*?</script>", html))
     script_vals = set()
     script = re.sub(r"\b(?:r|W|H|L|R|w|h|width|height|rowH|barH|pad\w*|cx|cy|x|y|dx|dy|size|opacity|stroke\w*|font\w*)\s*[:=]\s*\"?-?\d+(?:\.\d+)?", " ", script)
     script = script.replace("111.32", " ").replace("111.320", " ")  # 위도 1도 ≈ 111.32 km (축척 막대)
+    # 템플릿 문자열 속 천 단위 쉼표 숫자(20,573.78)는 한 숫자로 읽는다. 조각(573.78)으로 나뉘어 오판하지 않게.
+    def _join(m):
+        v = float(m.group(0).replace(",", ""))
+        return f" {v} " if matched(round(v, 1)) else f" {m.group(0).replace(',', '')} "
+    script = re.sub(r"(?<![\d.])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d])", _join, script)
     for m in re.findall(r"(?<![\w.#])-?\d+(?:\.\d+)?(?![\w])", script):
         f = float(m)
         if "." in m or abs(f) >= 1000:
             script_vals.add(round(f, 1))
     # 축 눈금(1000 의 배수 정수)은 그리기용이라 대조에서 뺀다.
+    script_vals -= ticks(script_vals)
     unmatched_script = sorted(x for x in script_vals if not matched(x) and not (x == int(x) and int(x) % 1000 == 0))
     report = {
         "q": a.q, "cond": a.cond, "rep": a.rep, "seconds": round(time.time() - t0),
