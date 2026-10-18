@@ -1,3 +1,4 @@
 evals/runs/
 evals/runs-*/
 .DS_Store
+dist/
