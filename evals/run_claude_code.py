@@ -50,6 +50,7 @@ def main():
     ap.add_argument("--rep", type=int, default=1)
     ap.add_argument("--out", default=str(ROOT / "evals/runs"))
     ap.add_argument("--model", default=None)
+    ap.add_argument("--parse-only", action="store_true", help="이미 있는 stream.jsonl 만 다시 판정")
     a = ap.parse_args()
     run = pathlib.Path(a.out) / f"q{a.q:02d}-{a.cond}-r{a.rep}"
     run.mkdir(parents=True, exist_ok=True)
@@ -60,20 +61,23 @@ def main():
     if a.model:
         cmd += ["--model", a.model]
     t0 = time.time()
-    with open(run / "stream.jsonl", "w") as f:
-        subprocess.run(cmd, cwd=run, stdout=f, stderr=open(run / "stderr.txt", "w"), timeout=900)
+    cost = None
+    if not a.parse_only:
+        with open(run / "stream.jsonl", "w") as f:
+            subprocess.run(cmd, cwd=run, stdout=f, stderr=open(run / "stderr.txt", "w"), timeout=900)
     tool_calls, tool_results, skills_used, final = [], [], [], ""
     for line in open(run / "stream.jsonl"):
         try:
             d = json.loads(line)
         except json.JSONDecodeError:
             continue
-        msg = d.get("message") or {}
-        for c in msg.get("content") or [] if isinstance(msg.get("content"), list) else []:
+        msg = d.get("message") if isinstance(d.get("message"), dict) else {}
+        content = msg.get("content") if isinstance(msg.get("content"), list) else []
+        for c in content:
+            if not isinstance(c, dict):
+                continue
             if c.get("type") == "tool_use":
                 tool_calls.append({"name": c["name"], "input": c.get("input")})
-                if c["name"] == "Skill" or "skill" in json.dumps(c.get("input", {})).lower() and c["name"] == "Skill":
-                    skills_used.append(c.get("input"))
             if c.get("type") == "tool_result":
                 body = c.get("content")
                 if isinstance(body, list):
@@ -101,18 +105,28 @@ def main():
         return any(abs(x - s) <= max(0.51, abs(s) * 0.0005) for s in src) or \
                any(abs(x * 1000 - s) <= 50 for s in src)  # 25.4k 같은 표기
     unmatched = sorted(x for x in shown if not matched(x))
+    # 그림을 JS 로 그리는 경우: 스크립트 안 데이터 리터럴(소수 또는 1000 이상)도 대조한다.
+    script = " ".join(re.findall(r"<script[\s\S]*?</script>", html))
+    script_vals = set()
+    for m in re.findall(r"(?<![\w.#])-?\d+(?:\.\d+)?(?![\w])", script):
+        f = float(m)
+        if "." in m or abs(f) >= 1000:
+            script_vals.add(round(f, 1))
+    # 축 눈금(1000 의 배수 정수)은 그리기용이라 대조에서 뺀다.
+    unmatched_script = sorted(x for x in script_vals if not matched(x) and not (x == int(x) and int(x) % 1000 == 0))
     report = {
         "q": a.q, "cond": a.cond, "rep": a.rep, "seconds": round(time.time() - t0),
         "skill_tool_calls": [t for t in tool_calls if t["name"] == "Skill"],
         "mcp_calls": [t["name"].split("__")[-1] for t in mcp_calls],
         "html": bool(html), "shown_numbers": len(shown), "unmatched_numbers": unmatched[:60],
+        "script_numbers": len(script_vals), "unmatched_script_numbers": unmatched_script[:60],
         "caption": {k: bool(re.search(p, visible)) for k, p in
                     {"source": r"DLD|data\.dubai|Dubai Land", "as_of": r"기준일|as of|2026-10-\d\d",
                      "n": r"\bn\s*=|건수|표본", "notice": r"공식 서비스|official"}.items()},
         "low_sample_marked": bool(re.search(r"표본 부족|low.?sample", visible, re.I)),
         "split": bool(re.search(r"분양|오프플랜|off-?plan", visible, re.I) and re.search(r"준공|ready", visible, re.I)) or
                  bool(re.search(r"합산", visible)),
-        "cost_usd": locals().get("cost"),
+        "cost_usd": cost,
         "final": final[:800],
     }
     (run / "tool_results.json").write_text(json.dumps(mcp_results, ensure_ascii=False, indent=1))
