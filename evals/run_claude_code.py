@@ -65,7 +65,9 @@ def main():
     if not a.parse_only:
         with open(run / "stream.jsonl", "w") as f:
             subprocess.run(cmd, cwd=run, stdout=f, stderr=open(run / "stderr.txt", "w"), timeout=900)
-    tool_calls, tool_results, skills_used, final = [], [], [], ""
+    tool_calls, tool_results, final = [], [], ""
+    uses = {}  # tool_use_id -> (name, input)
+    src_texts = []  # 숫자 출처로 인정하는 텍스트: MCP 응답 + 파일로 넘친 MCP 응답을 다시 읽은 결과
     for line in open(run / "stream.jsonl"):
         try:
             d = json.loads(line)
@@ -78,11 +80,15 @@ def main():
                 continue
             if c.get("type") == "tool_use":
                 tool_calls.append({"name": c["name"], "input": c.get("input")})
+                uses[c.get("id")] = (c["name"], json.dumps(c.get("input"), ensure_ascii=False))
             if c.get("type") == "tool_result":
                 body = c.get("content")
                 if isinstance(body, list):
                     body = "".join(x.get("text", "") for x in body if isinstance(x, dict))
                 tool_results.append(body)
+                name, inp = uses.get(c.get("tool_use_id"), ("", ""))
+                if name.startswith("mcp__claude_ai_2__") or ("tool-results" in inp and name in ("Read", "Bash")):
+                    src_texts.append(body if isinstance(body, str) else json.dumps(body, ensure_ascii=False))
         if d.get("type") == "result":
             final = d.get("result", "")
             cost = d.get("total_cost_usd")
@@ -96,6 +102,10 @@ def main():
     src = set()
     for r in mcp_results:
         tool_numbers(r, src)
+    for t in src_texts:
+        src |= numbers(t)
+        src |= {round(float(m), 1) for m in re.findall(r"(?<![\w.])-?\d+\.\d+", t)}
+    rate_limited = sum(bool(re.search(r"호출 한도|rate.?limit|Too Many Requests|\b429\b(?!\d|,|\.)(?=\D{0,20}(error|오류|Too))", t, re.I)) for t in src_texts)
     html = (run / "chart.html").read_text() if (run / "chart.html").exists() else ""
     visible = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", html)
     visible = re.sub(r"<[^>]+>", " ", visible)
@@ -103,11 +113,29 @@ def main():
     # 그리기 좌표가 아닌 '보이는 텍스트'의 수만 대조. 반올림 표시(k, 정수) 허용.
     def matched(x):
         return any(abs(x - s) <= max(0.51, abs(s) * 0.0005) for s in src) or \
-               any(abs(x * 1000 - s) <= 50 for s in src)  # 25.4k 같은 표기
-    unmatched = sorted(x for x in shown if not matched(x))
+               any(abs(x * 1000 - s) <= 50 for s in src) or \
+               any(abs(x * 10000 - s) <= 5000 for s in src)  # 25.4k, 260만 같은 표기
+    # 축 눈금: 같은 간격으로 3개 이상 늘어선 정수열(간격이 500·1000 등의 배수)은 그리기용이다.
+    def ticks(vals):
+        ints = sorted(v for v in vals if v == int(v) and v % 100 == 0)
+        out = set()
+        for step in (100, 250, 500, 1000, 2000, 2500, 5000, 8000, 10000):
+            run = [v for v in ints if v % step == 0]
+            for v in run:
+                if v + step in run and (v + 2 * step in run or v - step in run):
+                    out |= {v, v + step}
+                    if v + 2 * step in run: out.add(v + 2 * step)
+                    if v - step in run: out.add(v - step)
+        return out
+    tick_vals = ticks(shown)
+    shown = shown - tick_vals
+    # 순위·목록 번호 같은 작은 정수(≤50)는 대조에서 뺀다.
+    unmatched = sorted(x for x in shown if not matched(x) and not (x == int(x) and abs(x) <= 50))
     # 그림을 JS 로 그리는 경우: 스크립트 안 데이터 리터럴(소수 또는 1000 이상)도 대조한다.
     script = " ".join(re.findall(r"<script[\s\S]*?</script>", html))
     script_vals = set()
+    script = re.sub(r"\b(?:r|W|H|L|R|w|h|width|height|rowH|barH|pad\w*|cx|cy|x|y|dx|dy|size|opacity|stroke\w*|font\w*)\s*[:=]\s*\"?-?\d+(?:\.\d+)?", " ", script)
+    script = script.replace("111.32", " ").replace("111.320", " ")  # 위도 1도 ≈ 111.32 km (축척 막대)
     for m in re.findall(r"(?<![\w.#])-?\d+(?:\.\d+)?(?![\w])", script):
         f = float(m)
         if "." in m or abs(f) >= 1000:
@@ -126,7 +154,8 @@ def main():
         "low_sample_marked": bool(re.search(r"표본 부족|low.?sample", visible, re.I)),
         "split": bool(re.search(r"분양|오프플랜|off-?plan", visible, re.I) and re.search(r"준공|ready", visible, re.I)) or
                  bool(re.search(r"합산", visible)),
-        "cost_usd": cost,
+        "cost_usd": cost, "rate_limited_results": rate_limited,
+        "raw_rows_in_html": html.count('"psm"') + len(re.findall(r"<tr>", html)),
         "final": final[:800],
     }
     (run / "tool_results.json").write_text(json.dumps(mcp_results, ensure_ascii=False, indent=1))
